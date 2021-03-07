@@ -1,0 +1,169 @@
+#!/usr/bin/perl
+# Copyright (C) 2021 James Francis Dougherty, III (jafrado@gmail.com)
+#
+# Mirror a slack_export.zip extracted locally to /slack
+# and rewrite JSONs to reference mirrored files 
+# NOTE: change $documentroot to modify file:// location
+
+use strict;
+use warnings;
+use JSON;
+use LWP::Simple;
+use File::Basename;
+use File::Spec;
+use utf8;
+use Cwd qw(getcwd);
+
+binmode STDOUT, ":utf8";
+my $json = new JSON::XS;
+$json->pretty(1);
+    
+# Input file, first arg on commandline    
+my $inputfile = shift || die "no file specified\n";
+
+# input filename, path, suffix and extracted output directory
+my $fname;
+my $fpath;
+my $fsuffix;
+my $outputdir;
+my $linklocation;
+my $documentroot ="/slack";
+    
+# cross-platform, glean file separator
+my $file_separator = File::Spec->catfile('', '');
+
+# get file details
+($fname,$fpath,$fsuffix) = fileparse($inputfile);
+
+# save current working directory (cwd) 
+my $execdir = getcwd;
+print "CWD[$execdir]\n";
+
+# construct path variables
+my $outputfile = $fpath."local-".$fname.$fsuffix;
+$outputdir = $fpath;
+
+
+# slack-export-viewer creates virtual directories
+# use linklocation to point to directory in filesystem
+if (index ($outputdir, '.') >= 0) {
+
+    # use cwd for file path-spec
+    #    $linklocation = "file://".$execdir.substr($outputdir,1);
+    $linklocation = "file://".$documentroot.substr($outputdir,1);
+    
+}
+else {
+    # use cwd for file path spec
+    #   $linklocation = "file://".$execdir.$outputdir;
+    
+    $linklocation = "file://".$documentroot.$outputdir;
+}
+
+print STDERR "Directory[$outputdir]\n";
+print STDERR "Link[$linklocation]\n";
+
+my $json_text;
+{
+  local $/; #Enable 'slurp' mode
+  open(my $input_fh, "<", $inputfile) or die ("Cannot open [$inputfile]\n");
+  $json_text = <$input_fh>;
+  close $input_fh;
+}
+
+# Decode JSON text
+my $data = $json->decode($json_text);
+
+# Parsed variables we use locally
+my $link = "";
+my $link_dl = "";
+my $name = "";
+my $timestamp = "";
+my $id = "";
+my $filename = "";
+my $pl =  "";
+my $pl_dl = "";
+my $content;
+my $mirrorstatus;
+
+# extract links
+# Note: record is the first json record
+for my $record ( @$data ) {
+    my $type = $record->{type};
+
+# we found a "files:" section    
+    my $filelist = $record->{files};
+    
+    if ($filelist) {
+	# within, we look for the "url_privatexxxx variables ..."
+	for my $url (@$filelist) {
+	    $link = $url->{url_private};
+	    $link_dl = $url->{url_private_download};
+
+	    $pl = $url->{permalink};
+	    $pl_dl = $url->{permalink_public};
+	    
+	    $name = $url->{name};
+	    $timestamp = $url->{timestamp};
+	    $id = $url->{id};
+
+	    # put file in the same directory as the json file ...
+#	    $filename = $outputdir.$file_separator.$name;
+	    $filename = $name;
+	    #print "$filename=[$id,$name,$timestamp,$link_dl, $link, $pl, $pl_dl]g\n";
+
+	    chdir $outputdir;
+
+	    # Check if a valid URL is found
+	    if ($link_dl =~ m[http]) {
+		print STDERR $link_dl,"\n";
+	    }
+	    else {
+		# We already downloaded it, move on to next item ...
+		print STDERR "Already downloaded[$link_dl]\n";
+		next;
+	    }
+	    
+	    # Now sometimes, the filename will be the same (e.g. image.png), try to make
+	    # a unique name if the $name is already present in the current directory	    
+	    if (-e $filename) {
+		print STDERR "[$filename] exists,";
+		$filename = $id."-".$name;
+		print STDERR "renaming to[$filename] - ";		
+	    } else {
+		print STDERR "Storing [$filename] - ";
+	    }
+
+	    if (($mirrorstatus = mirror($link_dl, $filename)) == RC_NOT_MODIFIED){
+		print STDERR "$filename has not changed - no action\n";
+	    }
+	    else {
+		print "Status:$mirrorstatus\n";
+	    }
+	    #@@TODO: handle more error codes besides if-modified-since
+	    if (is_success(getprint($filename))) {
+		print STDERR "$filename retrieved\n";
+	    }
+
+	    #rewrite url_private,url_private_download as local filename in JSON
+#	    $url->{url_private_download} = $filename;
+	    #	    $url->{url_private} = $filename;
+
+	    # rewrite url_privat, url_private_download to include path
+	    $url->{url_private_download} = $linklocation.$filename;
+	    $url->{url_private} = $linklocation.$filename;
+	    
+	}
+	
+    }
+}
+
+# go back to directory we started from (or else write will fail)
+chdir $execdir;
+
+# write back JSON file
+my $out_fh;
+open($out_fh, ">", $inputfile) or die("cannot write to output file[$inputfile]\n");
+print $out_fh $json->encode($data);
+close $out_fh;
+ 
